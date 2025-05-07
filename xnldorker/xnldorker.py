@@ -1198,6 +1198,7 @@ def load_proxies(proxy_list):
     """Load proxies from either a file or a comma-separated string"""
     global proxies
     proxies = []
+    protocols = ["http://", "https://", "socks4://", "socks5://"]
     
     # Check if the input is a file
     if os.path.isfile(proxy_list):
@@ -1207,7 +1208,7 @@ def load_proxies(proxy_list):
                     line = line.strip()
                     if line and not line.startswith('#'):
                         # Ensure proxy has correct format (add http:// if missing)
-                        if not line.startswith('http://') and not line.startswith('https://'):
+                        if not any(line.lower().startswith(proto) for proto in protocols):
                             line = 'http://' + line
                         proxies.append(line)
             if verbose():
@@ -1218,11 +1219,9 @@ def load_proxies(proxy_list):
         # Treat as comma-separated list
         for p in proxy_list.split(','):
             p = p.strip()
-            if p:
-                # Ensure proxy has correct format (add http:// if missing)
-                if not p.startswith('http://') and not p.startswith('https://'):
-                    p = 'http://' + p
-                proxies.append(p)
+            if p and not any(p.lower().startswith(proto) for proto in protocols):
+                p = f"http://{p}"
+            proxies.append(p)
         if verbose():
             writerr(colored(f'Loaded {len(proxies)} proxies from command line', 'green'))
     return len(proxies) > 0
