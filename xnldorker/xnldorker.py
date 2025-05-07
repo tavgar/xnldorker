@@ -672,20 +672,26 @@ async def getGoogle(browser, dork, semaphore):
     try:
         endpoints = []
         page = None
+        context = None
         await semaphore.acquire()
         
         while proxy_retries <= max_proxy_retries:
             current_proxy = None
             
             try:
+                # Clean up previous context and page if they exist
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
+                
                 # Create a new context with the current proxy if available
                 if proxies_available:
                     current_proxy = get_next_proxy()
-                    if current_proxy in tried_proxies:
+                    if current_proxy in tried_proxies and len(tried_proxies) >= len(proxies):
                         # We've tried all proxies
-                        if proxy_retries >= max_proxy_retries:
-                            writerr(colored('[ Google ] All proxies have been tried and failed with CAPTCHA', 'red'))
-                            return set(endpoints)
+                        writerr(colored('[ Google ] All proxies have been tried and failed with CAPTCHA', 'red'))
+                        return set(endpoints)
                     
                     tried_proxies.add(current_proxy)
                     proxy_retries += 1
@@ -709,8 +715,12 @@ async def getGoogle(browser, dork, semaphore):
                 #  hl=en - English language
                 #  filter=0 - Show near duplicate content
                 #  num=100 - Show upto 100 results per page
-                await page.goto(f'https://www.google.com/search?tbs=li:1&hl=en&filter=0&num=100&q={dork}', timeout=args.timeout*1000)
-                await page.wait_for_load_state('networkidle', timeout=args.timeout*1000)
+                extended_timeout = args.timeout * 3 if proxies_available else args.timeout
+                await page.goto(f'https://www.google.com/search?tbs=li:1&hl=en&filter=0&num=100&q={dork}', 
+                               timeout=extended_timeout*1000)
+                
+                # Increased timeout for network idle when using proxies
+                await page.wait_for_load_state('domcontentloaded', timeout=extended_timeout*1000)
                 
                 pageNo = 1
                 
@@ -719,7 +729,6 @@ async def getGoogle(browser, dork, semaphore):
                 if captcha:
                     if proxies_available:
                         writerr(colored(f'[ Google ] reCAPTCHA detected with proxy {current_proxy}, trying next proxy...', 'yellow'))
-                        await page.close()
                         continue
                     elif args.show_browser:
                         writerr(colored(f'[ Google ] reCAPTCHA needs responding to. Process will resume in {args.antibot_timeout} seconds, or when you type "google" and press ENTER...','yellow')) 
@@ -731,22 +740,22 @@ async def getGoogle(browser, dork, semaphore):
                 
                 try:
                     # Wait for the search results to be fully loaded and have links
-                    await page.wait_for_load_state('networkidle', timeout=args.timeout*1000)
+                    await page.wait_for_load_state('networkidle', timeout=extended_timeout*1000)
                 except:
-                    pass
+                    # If timeout occurs, try to continue anyway as we might have partial results
+                    if verbose():
+                        writerr(colored('[ Google ] Network idle timeout - continuing with available results', 'yellow'))
 
                 # Check if bot detection is still shown
                 captcha = await page.query_selector('form#captcha-form')
                 if captcha:
                     if proxies_available:
                         writerr(colored(f'[ Google ] reCAPTCHA still present with proxy {current_proxy}, trying next proxy...', 'yellow'))
-                        await page.close()
                         continue
                     else:
                         writerr(colored('[ Google ] Failed to complete reCAPTCHA','red'))
                         return set(endpoints)
                 
-                # Rest of the Google search function remains the same...
                 # If the cookies notice is shown, accept it
                 cookieAccept = await page.query_selector('button:has-text("Accept all")')
                 if cookieAccept:
@@ -770,8 +779,8 @@ async def getGoogle(browser, dork, semaphore):
                         next_href = await next_button.get_attribute('href')
                         if next_href:
                             next_url = 'https://www.google.com' + next_href
-                            await page.goto(next_url, timeout=args.timeout * 1000)
-                            await page.wait_for_load_state('domcontentloaded', timeout=args.timeout * 1000)
+                            await page.goto(next_url, timeout=extended_timeout * 1000)
+                            await page.wait_for_load_state('domcontentloaded', timeout=extended_timeout * 1000)
 
                             pageNo += 1
                             if vverbose():
@@ -787,10 +796,21 @@ async def getGoogle(browser, dork, semaphore):
                 break
                 
             except Exception as e:
-                if 'net::ERR_PROXY_CONNECTION_FAILED' in str(e) and current_proxy:
-                    writerr(colored(f'[ Google ] Proxy connection failed: {current_proxy}', 'red'))
-                    if proxies_available and proxy_retries < max_proxy_retries:
+                if current_proxy:
+                    if 'net::ERR_PROXY_CONNECTION_FAILED' in str(e):
+                        writerr(colored(f'[ Google ] Proxy connection failed: {current_proxy}', 'red'))
+                    elif 'net::ERR_TIMED_OUT' in str(e) or 'Timeout' in str(e):
+                        writerr(colored(f'[ Google ] Proxy timed out: {current_proxy}', 'red'))
+                    elif 'net::ERR_ABORTED' in str(e):
+                        writerr(colored(f'[ Google ] Request aborted with proxy: {current_proxy}', 'red'))
+                    else:
+                        writerr(colored(f'[ Google ] Error with proxy {current_proxy}: {str(e)}', 'red'))
+                    
+                    # Only continue if we haven't tried all proxies yet
+                    if proxies_available and len(tried_proxies) < len(proxies):
                         continue
+                    else:
+                        raise e
                 else:
                     # Re-raise the exception to be caught by the outer try/except
                     raise e
@@ -815,7 +835,10 @@ async def getGoogle(browser, dork, semaphore):
         return set(endpoints)
     finally:
         try:
-            await page.close()
+            if page:
+                await page.close()
+            if context:
+                await context.close()
             semaphore.release()
         except:
             pass
@@ -1230,6 +1253,9 @@ def load_proxies(proxy_list):
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith('#'):
+                        # Ensure proxy has correct format (add http:// if missing)
+                        if not line.startswith('http://') and not line.startswith('https://'):
+                            line = 'http://' + line
                         proxies.append(line)
             if verbose():
                 writerr(colored(f'Loaded {len(proxies)} proxies from file', 'green'))
@@ -1237,7 +1263,13 @@ def load_proxies(proxy_list):
             writerr(colored(f'Error loading proxies from file: {str(e)}', 'red'))
     else:
         # Treat as comma-separated list
-        proxies = [p.strip() for p in proxy_list.split(',') if p.strip()]
+        for p in proxy_list.split(','):
+            p = p.strip()
+            if p:
+                # Ensure proxy has correct format (add http:// if missing)
+                if not p.startswith('http://') and not p.startswith('https://'):
+                    p = 'http://' + p
+                proxies.append(p)
         if verbose():
             writerr(colored(f'Loaded {len(proxies)} proxies from command line', 'green'))
             
