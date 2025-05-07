@@ -66,6 +66,9 @@ yandexEndpoints = set()
 allSubs = set()
 sourcesToProcess = []
 
+proxies = []
+current_proxy_index = -1
+
 # Functions used when printing messages dependant on verbose options
 def verbose():
     return args.verbose or args.vverbose
@@ -660,85 +663,137 @@ async def getResultsGoogle(page, endpoints):
         writerr(colored('ERROR getResultsGoogle 1: ' + str(e), 'red')) 
         
 async def getGoogle(browser, dork, semaphore):
+    global stopProgram
+    tried_proxies = set()
+    proxies_available = len(proxies) > 0
+    max_proxy_retries = len(proxies) if proxies_available else 0
+    proxy_retries = 0
+    
     try:
         endpoints = []
         page = None
         await semaphore.acquire()
-        page = await browser.new_page(user_agent=DEFAULT_USER_AGENT)
         
-        if verbose():
-            writerr(colored('[ Google ] Starting...', 'green'))
-        
-        # Use the parameters:
-        #  tbs=li:1 - Verbatim search
-        #  hl=en - English language
-        #  filter=0 - Show near duplicate content
-        #  num=100 - Show upto 100 results per page
-        await page.goto(f'https://www.google.com/search?tbs=li:1&hl=en&filter=0&num=100&q={dork}', timeout=args.timeout*1000)
-        await page.wait_for_load_state('networkidle', timeout=args.timeout*1000)
-        
-        pageNo = 1
-        
-        # If captcha is shown then allow time to submit it
-        captcha = await page.query_selector('form#captcha-form')
-        if captcha:
-            if args.show_browser:
-                writerr(colored(f'[ Google ] reCAPTCHA needs responding to. Process will resume in {args.antibot_timeout} seconds, or when you type "google" and press ENTER...','yellow')) 
-                await wait_for_word_or_sleep("google", args.antibot_timeout)
-                writerr(colored(f'[ Google ] Resuming...', 'green'))
-            else:
-                writerr(colored('[ Google ] reCAPTCHA needed responding to. Consider using option -sb / --show-browser','red'))
-                return set(endpoints)
-        
-        try:
-            # Wait for the search results to be fully loaded and have links
-            await page.wait_for_load_state('networkidle', timeout=args.timeout*1000)
-        except:
-            pass
-
-        # Check if bot detection is still shown
-        captcha = await page.query_selector('form#captcha-form')
-        if captcha:
-            writerr(colored('[ Google ] Failed to complete reCAPTCHA','red'))
-            return set(endpoints)
-        
-        # If the cookies notice is shown, accept it
-        cookieAccept = await page.query_selector('button:has-text("Accept all")')
-        if cookieAccept:
-            await cookieAccept.click()
-        
-        # If the dialog box asking if you want location specific search, say Not now
-        locationSpecific = await page.query_selector('g-raised-button:has-text("Not now")')
-        if locationSpecific:
-            await locationSpecific.click()
-    
-        # Collect endpoints from the initial page
-        endpoints = await getResultsGoogle(page, endpoints)
-
-        # Main loop to keep navigating to next pages until there's no "Next page" link
-        while True:
-            if stopProgram:
-                break
-            # Get href from the Next button
-            next_button = await page.query_selector('#pnnext')
-            if next_button:
-                next_href = await next_button.get_attribute('href')
-                if next_href:
-                    next_url = 'https://www.google.com' + next_href
-                    await page.goto(next_url, timeout=args.timeout * 1000)
-                    await page.wait_for_load_state('domcontentloaded', timeout=args.timeout * 1000)
-
-                    pageNo += 1
-                    if vverbose():
-                        writerr(colored('[ Google ] Getting endpoints from page ' + str(pageNo), 'green', attrs=['dark']))
+        while proxy_retries <= max_proxy_retries:
+            current_proxy = None
+            
+            try:
+                # Create a new context with the current proxy if available
+                if proxies_available:
+                    current_proxy = get_next_proxy()
+                    if current_proxy in tried_proxies:
+                        # We've tried all proxies
+                        if proxy_retries >= max_proxy_retries:
+                            writerr(colored('[ Google ] All proxies have been tried and failed with CAPTCHA', 'red'))
+                            return set(endpoints)
                     
-                    # Collect endpoints from the current page
-                    endpoints += await getResultsGoogle(page, endpoints)
-            else:
-                # No "Next" button found, exit the loop
-                break
+                    tried_proxies.add(current_proxy)
+                    proxy_retries += 1
+                    
+                    if verbose():
+                        writerr(colored(f'[ Google ] Using proxy: {current_proxy}', 'green'))
+                    
+                    context = await browser.new_context(
+                        proxy={"server": current_proxy},
+                        user_agent=DEFAULT_USER_AGENT
+                    )
+                    page = await context.new_page()
+                else:
+                    page = await browser.new_page(user_agent=DEFAULT_USER_AGENT)
+                
+                if verbose():
+                    writerr(colored('[ Google ] Starting...', 'green'))
+                
+                # Use the parameters:
+                #  tbs=li:1 - Verbatim search
+                #  hl=en - English language
+                #  filter=0 - Show near duplicate content
+                #  num=100 - Show upto 100 results per page
+                await page.goto(f'https://www.google.com/search?tbs=li:1&hl=en&filter=0&num=100&q={dork}', timeout=args.timeout*1000)
+                await page.wait_for_load_state('networkidle', timeout=args.timeout*1000)
+                
+                pageNo = 1
+                
+                # If captcha is shown then try next proxy or allow time to submit it
+                captcha = await page.query_selector('form#captcha-form')
+                if captcha:
+                    if proxies_available:
+                        writerr(colored(f'[ Google ] reCAPTCHA detected with proxy {current_proxy}, trying next proxy...', 'yellow'))
+                        await page.close()
+                        continue
+                    elif args.show_browser:
+                        writerr(colored(f'[ Google ] reCAPTCHA needs responding to. Process will resume in {args.antibot_timeout} seconds, or when you type "google" and press ENTER...','yellow')) 
+                        await wait_for_word_or_sleep("google", args.antibot_timeout)
+                        writerr(colored(f'[ Google ] Resuming...', 'green'))
+                    else:
+                        writerr(colored('[ Google ] reCAPTCHA needed responding to. Consider using option -sb / --show-browser or --proxy-list','red'))
+                        return set(endpoints)
+                
+                try:
+                    # Wait for the search results to be fully loaded and have links
+                    await page.wait_for_load_state('networkidle', timeout=args.timeout*1000)
+                except:
+                    pass
 
-        await page.close()
+                # Check if bot detection is still shown
+                captcha = await page.query_selector('form#captcha-form')
+                if captcha:
+                    if proxies_available:
+                        writerr(colored(f'[ Google ] reCAPTCHA still present with proxy {current_proxy}, trying next proxy...', 'yellow'))
+                        await page.close()
+                        continue
+                    else:
+                        writerr(colored('[ Google ] Failed to complete reCAPTCHA','red'))
+                        return set(endpoints)
+                
+                # Rest of the Google search function remains the same...
+                # If the cookies notice is shown, accept it
+                cookieAccept = await page.query_selector('button:has-text("Accept all")')
+                if cookieAccept:
+                    await cookieAccept.click()
+                
+                # If the dialog box asking if you want location specific search, say Not now
+                locationSpecific = await page.query_selector('g-raised-button:has-text("Not now")')
+                if locationSpecific:
+                    await locationSpecific.click()
+            
+                # Collect endpoints from the initial page
+                endpoints = await getResultsGoogle(page, endpoints)
+
+                # Main loop to keep navigating to next pages until there's no "Next page" link
+                while True:
+                    if stopProgram:
+                        break
+                    # Get href from the Next button
+                    next_button = await page.query_selector('#pnnext')
+                    if next_button:
+                        next_href = await next_button.get_attribute('href')
+                        if next_href:
+                            next_url = 'https://www.google.com' + next_href
+                            await page.goto(next_url, timeout=args.timeout * 1000)
+                            await page.wait_for_load_state('domcontentloaded', timeout=args.timeout * 1000)
+
+                            pageNo += 1
+                            if vverbose():
+                                writerr(colored('[ Google ] Getting endpoints from page ' + str(pageNo), 'green', attrs=['dark']))
+                            
+                            # Collect endpoints from the current page
+                            endpoints += await getResultsGoogle(page, endpoints)
+                    else:
+                        # No "Next" button found, exit the loop
+                        break
+
+                # Successfully completed search - break out of the retry loop
+                break
+                
+            except Exception as e:
+                if 'net::ERR_PROXY_CONNECTION_FAILED' in str(e) and current_proxy:
+                    writerr(colored(f'[ Google ] Proxy connection failed: {current_proxy}', 'red'))
+                    if proxies_available and proxy_retries < max_proxy_retries:
+                        continue
+                else:
+                    # Re-raise the exception to be caught by the outer try/except
+                    raise e
 
         setEndpoints = set(endpoints)
         if verbose():
@@ -1143,6 +1198,8 @@ def showOptionsAndConfig():
         write(colored('-rwos: ' + str(args.resubmit_without_subs), 'magenta')+colored(' Whether the query will be resubmitted, but excluding the sub domains found in the first search.','white'))
         if args.proxy:
             write(colored('-proxy: ' + str(args.proxy), 'magenta')+colored(' The proxy to send found links to.','white'))
+        if args.proxy_list:
+            write(colored('-pl: ' + str(args.proxy_list), 'magenta')+colored(' The proxy list to rotate through when encountering CAPTCHA.','white'))
         write(colored('Sources being checked: ', 'magenta')+str(sourcesToProcess))
         write('')
         
@@ -1161,9 +1218,44 @@ def argcheckSources(value):
         )
     return value
     
+def load_proxies(proxy_list):
+    """Load proxies from either a file or a comma-separated string"""
+    global proxies
+    proxies = []
+    
+    # Check if the input is a file
+    if os.path.isfile(proxy_list):
+        try:
+            with open(proxy_list, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        proxies.append(line)
+            if verbose():
+                writerr(colored(f'Loaded {len(proxies)} proxies from file', 'green'))
+        except Exception as e:
+            writerr(colored(f'Error loading proxies from file: {str(e)}', 'red'))
+    else:
+        # Treat as comma-separated list
+        proxies = [p.strip() for p in proxy_list.split(',') if p.strip()]
+        if verbose():
+            writerr(colored(f'Loaded {len(proxies)} proxies from command line', 'green'))
+            
+    return len(proxies) > 0
+
+def get_next_proxy():
+    """Get the next proxy from the list in a round-robin fashion"""
+    global proxies, current_proxy_index
+    
+    if not proxies:
+        return None
+        
+    current_proxy_index = (current_proxy_index + 1) % len(proxies)
+    return proxies[current_proxy_index]
+
 async def run_main():
     
-    global args, sourcesToProcess, allSubs, inputDork
+    global args, sourcesToProcess, allSubs, inputDork, proxies
     
     # Tell Python to run the handler() function when SIGINT is received
     signal(SIGINT, handler)
@@ -1262,6 +1354,13 @@ async def run_main():
         help="Send the links found to a proxy, e.g http://127.0.0.1:8080",
         default="",
     )
+    parser.add_argument(
+        "-pl",
+        "--proxy-list",
+        action="store",
+        help="Path to a file containing proxies (one per line) or a comma-separated list of proxies to rotate through when encountering CAPTCHA.",
+        default="",
+    )
     parser.add_argument('--debug', action='store_true', help='Save page contents on error.')
     parser.add_argument('-nb', '--no-banner', action='store_true', help='Hides the tool banner.')
     parser.add_argument('--version', action='store_true', help='Show version number')
@@ -1313,7 +1412,12 @@ async def run_main():
                 showBanner()
             if verbose():
                 showOptionsAndConfig()
-            
+        
+        # Load proxies if a proxy list was provided
+        if args.proxy_list:
+            if load_proxies(args.proxy_list) and verbose():
+                writerr(colored(f'Loaded {len(proxies)} proxies for rotation', 'green'))
+                
         # Process the input given on -i (--input), or <stdin>
         await processInput(inputDork)
 
