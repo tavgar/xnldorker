@@ -68,12 +68,20 @@ sourcesToProcess = []
 
 proxies = []
 current_proxy_index = -1
+current_user_agent_index = -1
 
 # Functions used when printing messages dependant on verbose options
 def verbose():
     return args.verbose or args.vverbose
 def vverbose():
     return args.vverbose
+
+def get_next_user_agent():
+    global UA_DESKTOP, current_user_agent_index, DEFAULT_USER_AGENT
+    if not UA_DESKTOP:
+        return DEFAULT_USER_AGENT
+    current_user_agent_index = (current_user_agent_index + 1) % len(UA_DESKTOP)
+    return UA_DESKTOP[current_user_agent_index]
 
 def write(text='',pipe=False):
     # Only send text to stdout if the tool isn't piped to pass output to something else, 
@@ -188,7 +196,7 @@ async def getDuckDuckGo(browser, dork, semaphore):
         endpoints = []
         page = None
         await semaphore.acquire()
-        page = await browser.new_page(user_agent=DEFAULT_USER_AGENT)
+        page = await browser.new_page(user_agent=get_next_user_agent())
         
         if verbose():
             writerr(colored('[ DuckDuckGo ] Starting...', 'green'))
@@ -297,7 +305,7 @@ async def getBing(browser, dork, semaphore):
         endpoints = [] 
         page = None
         await semaphore.acquire()
-        page = await browser.new_page(user_agent=DEFAULT_USER_AGENT)
+        page = await browser.new_page(user_agent=get_next_user_agent())
         
         if verbose():
             writerr(colored('[ Bing ] Starting...', 'green'))
@@ -383,7 +391,7 @@ async def getStartpage(browser, dork, semaphore):
         endpoints = []
         page = None
         await semaphore.acquire()
-        page = await browser.new_page(user_agent=DEFAULT_USER_AGENT)
+        page = await browser.new_page(user_agent=get_next_user_agent())
         
         if verbose():
             writerr(colored('[ Startpage ] Starting...', 'green'))
@@ -560,7 +568,7 @@ async def getYahoo(browser, dork, semaphore):
         endpoints = []
         page = None
         await semaphore.acquire()
-        page = await browser.new_page(user_agent=DEFAULT_USER_AGENT)
+        page = await browser.new_page(user_agent=get_next_user_agent())
         
         if verbose():
             writerr(colored('[ Yahoo ] Starting...', 'green'))
@@ -701,11 +709,11 @@ async def getGoogle(browser, dork, semaphore):
                     
                     context = await browser.new_context(
                         proxy={"server": current_proxy},
-                        user_agent=DEFAULT_USER_AGENT
+                        user_agent=get_next_user_agent()
                     )
                     page = await context.new_page()
                 else:
-                    page = await browser.new_page(user_agent=DEFAULT_USER_AGENT)
+                    page = await browser.new_page(user_agent=get_next_user_agent())
                 
                 if verbose():
                     writerr(colored('[ Google ] Starting...', 'green'))
@@ -860,7 +868,7 @@ async def getYandex(browser, dork, semaphore):
         endpoints = []
         page = None
         await semaphore.acquire()
-        context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
+        context = await browser.new_context(user_agent=get_next_user_agent())
         page = await context.new_page()
         if verbose():
             writerr(colored('[ Yandex ] Starting...', 'green'))
